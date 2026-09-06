@@ -77,8 +77,11 @@ class LlamaCppEngineBridge(private val context: Context) : InferenceEngine {
         val memInfo = ActivityManager.MemoryInfo()
         am.getMemoryInfo(memInfo)
 
-        val totalMb = memInfo.totalMem / (1024 * 1024)
-        val availMb = memInfo.availMem / (1024 * 1024)
+        val rawTotal = if (memInfo.totalMem > 0) memInfo.totalMem else Runtime.getRuntime().maxMemory()
+        val rawAvail = if (memInfo.availMem > 0) memInfo.availMem else Runtime.getRuntime().freeMemory()
+
+        val totalMb = (rawTotal / (1024 * 1024)).coerceAtLeast(1024)
+        val availMb = (rawAvail / (1024 * 1024)).coerceAtLeast(512)
         val cores = Runtime.getRuntime().availableProcessors()
 
         // Recommended max model size leaves at least 1.5GB RAM for Android OS & system apps
@@ -113,16 +116,41 @@ class LlamaCppEngineBridge(private val context: Context) : InferenceEngine {
                 "Initiating load for '$modelName' (URI: $uri). Free RAM: ${diagnostics.availableRamMb}MB"
             )
 
-            // Open ParcelFileDescriptor in read mode via ContentResolver
+            val effectiveUri = when {
+                uri.scheme == null || uri.scheme?.isEmpty() == true -> Uri.fromFile(java.io.File(uri.path ?: uri.toString()))
+                else -> uri
+            }
+
+            // Open ParcelFileDescriptor in read mode via ContentResolver with fallback to File PFD
             val pfd = try {
-                context.contentResolver.openFileDescriptor(uri, "r")
+                context.contentResolver.openFileDescriptor(effectiveUri, "r")
+                    ?: if (effectiveUri.scheme == "file" && effectiveUri.path != null) {
+                        android.os.ParcelFileDescriptor.open(
+                            java.io.File(effectiveUri.path!!),
+                            android.os.ParcelFileDescriptor.MODE_READ_ONLY
+                        )
+                    } else null
             } catch (e: Exception) {
-                AppLogger.e("LlamaCppEngineBridge", "Failed to open descriptor for $uri: ${e.message}")
-                return@withContext Result.failure(
-                    PocketAIException.StoragePermissionException(uri.toString())
-                )
+                if (effectiveUri.scheme == "file" && effectiveUri.path != null) {
+                    try {
+                        android.os.ParcelFileDescriptor.open(
+                            java.io.File(effectiveUri.path!!),
+                            android.os.ParcelFileDescriptor.MODE_READ_ONLY
+                        )
+                    } catch (e2: Exception) {
+                        AppLogger.e("LlamaCppEngineBridge", "Failed to open descriptor for $effectiveUri: ${e2.message}")
+                        return@withContext Result.failure(
+                            PocketAIException.StoragePermissionException(effectiveUri.toString())
+                        )
+                    }
+                } else {
+                    AppLogger.e("LlamaCppEngineBridge", "Failed to open descriptor for $effectiveUri: ${e.message}")
+                    return@withContext Result.failure(
+                        PocketAIException.StoragePermissionException(effectiveUri.toString())
+                    )
+                }
             } ?: return@withContext Result.failure(
-                PocketAIException.ModelNotFoundException("Cannot open descriptor for $uri")
+                PocketAIException.ModelNotFoundException("Cannot open descriptor for $effectiveUri")
             )
 
             val fileSizeBytes = pfd.statSize
@@ -153,7 +181,7 @@ class LlamaCppEngineBridge(private val context: Context) : InferenceEngine {
             val effectiveThreads = if (params.threads > 0) params.threads else diagnostics.processorCores.coerceIn(2, 6)
 
             val startParams = mutableMapOf<String, Any>(
-                "model" to uri.toString(),
+                "model" to effectiveUri.toString(),
                 "model_fd" to fd,
                 "n_ctx" to effectiveContextLength,
                 "n_batch" to 512,
@@ -162,10 +190,19 @@ class LlamaCppEngineBridge(private val context: Context) : InferenceEngine {
                 "use_mmap" to true,
                 "use_mlock" to false,
                 "embedding" to false,
-                "vocab_only" to false
+                "vocab_only" to false,
+                "lora" to "",
+                "lora_scaled" to 1.0,
+                "rope_freq_base" to 0.0,
+                "rope_freq_scale" to 0.0
             )
 
             val engine = getLlamaAndroid()
+            try {
+                engine.setContextLimit(4)
+            } catch (e: Throwable) {
+                // Ignore if not supported
+            }
 
             val tokenForwarder: (String) -> Unit = { token ->
                 currentTokenListener?.invoke(token)
@@ -240,7 +277,11 @@ class LlamaCppEngineBridge(private val context: Context) : InferenceEngine {
             val ctxId = currentContextId
             if (ctxId != null) {
                 AppLogger.i("LlamaCppEngineBridge", "Releasing native context ID: $ctxId")
-                llamaAndroidInstance?.releaseContext(ctxId)
+                try {
+                    llamaAndroidInstance?.releaseContext(ctxId)
+                } catch (e: Throwable) {
+                    AppLogger.w("LlamaCppEngineBridge", "Error during releaseContext($ctxId): ${e.message}")
+                }
             }
             currentContextId = null
             activeModelName = null
@@ -303,13 +344,14 @@ class LlamaCppEngineBridge(private val context: Context) : InferenceEngine {
         }
 
         try {
+            // Note: LlamaContext requires Double for float-based hyperparameters
             val completionParams = mutableMapOf<String, Any>(
                 "prompt" to prompt,
-                "temperature" to params.temperature,
-                "top_p" to params.topP,
+                "temperature" to params.temperature.toDouble(),
+                "top_p" to params.topP.toDouble(),
                 "top_k" to params.topK,
                 "n_predict" to params.maxTokens,
-                "penalty_repeat" to params.repeatPenalty,
+                "penalty_repeat" to params.repeatPenalty.toDouble(),
                 "emit_partial_completion" to true,
                 "stop" to ChatTemplateFormatter.GLOBAL_STOP_TOKENS
             )
@@ -319,7 +361,10 @@ class LlamaCppEngineBridge(private val context: Context) : InferenceEngine {
             }
         } catch (e: Throwable) {
             if (e is CancellationException) {
-                AppLogger.i("LlamaCppEngineBridge", "Inference cancelled by user.")
+                AppLogger.i("LlamaCppEngineBridge", "Inference cancelled by user or coroutine scope.")
+                try {
+                    getLlamaAndroid().stopCompletion(contextId)
+                } catch (_: Throwable) {}
             } else {
                 AppLogger.e("LlamaCppEngineBridge", "Inference failure: ${e.message}", e)
                 throw PocketAIException.InferenceGenerationException(
