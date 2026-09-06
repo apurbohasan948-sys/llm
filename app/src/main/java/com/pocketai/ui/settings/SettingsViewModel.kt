@@ -63,9 +63,14 @@ class SettingsViewModel(
     private val _operationMessage = MutableStateFlow<String?>(null)
     val operationMessage: StateFlow<String?> = _operationMessage.asStateFlow()
 
+    private val _loadingModelId = MutableStateFlow<String?>(null)
+    val loadingModelId: StateFlow<String?> = _loadingModelId.asStateFlow()
+
     fun getHardwareDiagnostics(): HardwareDiagnostics {
         return app.inferenceEngine.getHardwareDiagnostics()
     }
+
+    fun getLatestGenerationDiagnostics() = app.localModelManager.getLatestGenerationDiagnostics()
 
     fun importLocalModel(uri: Uri) {
         viewModelScope.launch {
@@ -84,8 +89,10 @@ class SettingsViewModel(
 
     fun loadLocalModel(modelId: String) {
         viewModelScope.launch {
+            _loadingModelId.value = modelId
             _operationMessage.value = "Loading model weights into RAM..."
             val result = app.localModelManager.loadModel(modelId)
+            _loadingModelId.value = null
             if (result.isSuccess) {
                 app.preferencesManager.setSelectedLocalModelId(modelId)
                 _operationMessage.value = "Model loaded and active in memory."
@@ -106,6 +113,27 @@ class SettingsViewModel(
             app.preferencesManager.setSelectedLocalModelId(null)
             _operationMessage.value = "Model unloaded. RAM freed."
             _snackbarMessage.value = "Model unloaded from RAM."
+        }
+    }
+
+    fun updateLocalInferenceSettings(
+        contextLength: Int,
+        maxTokens: Int,
+        threads: Int,
+        temperature: Float,
+        topP: Float,
+        repeatPenalty: Float
+    ) {
+        viewModelScope.launch {
+            app.preferencesManager.setLocalInferenceConfig(
+                contextLength = contextLength,
+                maxTokens = maxTokens,
+                threads = threads,
+                temperature = temperature,
+                topP = topP,
+                repeatPenalty = repeatPenalty
+            )
+            _snackbarMessage.value = "Inference settings saved."
         }
     }
 

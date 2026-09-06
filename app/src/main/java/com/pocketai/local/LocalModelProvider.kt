@@ -13,16 +13,21 @@ data class LocalModelInfo(
     val architecture: String? = null,
     val quantization: String? = null,
     val contextLength: Int? = null,
+    val parametersCount: String? = null,
     val status: LocalModelStatus = LocalModelStatus.UNLOADED,
     val isLoaded: Boolean = false,
     val importTimestamp: Long = System.currentTimeMillis(),
-    val memoryFootprintMb: Long = 0L
+    val memoryFootprintMb: Long = 0L,
+    val lastError: String? = null
 )
 
 enum class LocalModelStatus {
-    UNLOADED,
+    NOT_IMPORTED,
+    IMPORTED,
     LOADING,
     LOADED,
+    UNLOADED,
+    UNLOADING,
     ERROR
 }
 
@@ -31,6 +36,7 @@ interface LocalModelProvider {
     suspend fun unloadModel(modelId: String): Result<Unit>
     suspend fun generate(prompt: String, context: List<ChatMessage>): Result<String>
     fun streamGenerate(prompt: String, context: List<ChatMessage>): Flow<String>
+    fun stopGeneration()
     fun getModelInfo(modelId: String): LocalModelInfo?
     fun isLoaded(): Boolean
     fun releaseResources()

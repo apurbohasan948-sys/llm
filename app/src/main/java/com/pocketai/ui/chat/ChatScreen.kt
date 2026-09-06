@@ -485,12 +485,21 @@ fun ChatBubble(
                             color = badgeColor
                         )
 
-                        if (message.latencyMs != null && message.latencyMs > 0) {
-                            Text(
-                                text = "${message.latencyMs}ms",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            if (message.tokensPerSecond != null && message.tokensPerSecond > 0) {
+                                Text(
+                                    text = String.format("%.1f tok/s • ", message.tokensPerSecond),
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = EmeraldSuccess
+                                )
+                            }
+                            if (message.latencyMs != null && message.latencyMs > 0) {
+                                Text(
+                                    text = "${message.latencyMs}ms",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
                         }
                     }
                 }

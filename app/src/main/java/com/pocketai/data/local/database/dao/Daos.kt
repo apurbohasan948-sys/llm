@@ -67,8 +67,14 @@ interface LocalModelDao {
     @Query("UPDATE local_models SET isLoaded = 0, status = 'UNLOADED'")
     suspend fun markAllUnloaded()
 
-    @Query("UPDATE local_models SET isLoaded = 1, status = 'LOADED', lastLoadedTimestamp = :timestamp WHERE id = :id")
+    @Query("UPDATE local_models SET isLoaded = 1, status = 'LOADED', lastLoadedTimestamp = :timestamp, lastError = null WHERE id = :id")
     suspend fun markLoaded(id: String, timestamp: Long = System.currentTimeMillis())
+
+    @Query("UPDATE local_models SET status = :status, lastError = :error WHERE id = :id")
+    suspend fun updateStatus(id: String, status: String, error: String? = null)
+
+    @Query("UPDATE local_models SET architecture = :architecture, contextLength = :contextLength, parametersCount = :parametersCount WHERE id = :id")
+    suspend fun updateModelMetadata(id: String, architecture: String?, contextLength: Int?, parametersCount: String?)
 
     @Query("DELETE FROM local_models WHERE id = :id")
     suspend fun deleteModelById(id: String)

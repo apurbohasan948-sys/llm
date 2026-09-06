@@ -7,17 +7,23 @@ import android.provider.OpenableColumns
 import com.pocketai.brain.ChatMessage
 import com.pocketai.core.error.PocketAIException
 import com.pocketai.core.logging.AppLogger
+import com.pocketai.data.preferences.PreferencesManager
+import com.pocketai.local.engines.ChatTemplateFormatter
+import com.pocketai.local.engines.GenerationDiagnostics
 import com.pocketai.local.engines.GgufHeaderParser
 import com.pocketai.local.engines.InferenceEngine
+import com.pocketai.local.engines.ModelInferenceParams
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.firstOrNull
 import kotlinx.coroutines.withContext
 import java.util.UUID
 
 class LocalModelManager(
     private val context: Context,
     private val repository: LocalModelRepository,
-    val engine: InferenceEngine
+    val engine: InferenceEngine,
+    private val preferencesManager: PreferencesManager? = null
 ) : LocalModelProvider {
 
     suspend fun importModelFromUri(uri: Uri): Result<LocalModelInfo> = withContext(Dispatchers.IO) {
@@ -63,7 +69,7 @@ class LocalModelManager(
                 architecture = metadata?.architecture ?: "transformer",
                 quantization = metadata?.quantization,
                 contextLength = metadata?.contextLength ?: 2048,
-                status = LocalModelStatus.UNLOADED,
+                status = LocalModelStatus.IMPORTED,
                 isLoaded = false,
                 importTimestamp = System.currentTimeMillis()
             )
@@ -81,24 +87,53 @@ class LocalModelManager(
         val model = repository.getModelById(modelId)
             ?: return@withContext Result.failure(PocketAIException.ModelNotFoundException(modelId))
 
-        AppLogger.i("LocalModelManager", "Loading model '${model.name}'")
+        AppLogger.i("LocalModelManager", "Transitioning state -> LOADING for '${model.name}'")
+        repository.updateStatus(modelId, LocalModelStatus.LOADING)
+
         val uri = Uri.parse(model.fileUri)
 
-        val loadResult = engine.loadModelFromUri(uri, model.name)
+        // Read user-configured inference parameters
+        val prefs = preferencesManager?.preferencesFlow?.firstOrNull()
+        val params = ModelInferenceParams(
+            contextLength = prefs?.localContextLength ?: (model.contextLength ?: 2048),
+            maxTokens = prefs?.localMaxTokens ?: 512,
+            threads = prefs?.localCpuThreads ?: 4,
+            temperature = prefs?.temperature ?: 0.7f,
+            topP = prefs?.localTopP ?: 0.9f,
+            topK = prefs?.localTopK ?: 40,
+            repeatPenalty = prefs?.localRepeatPenalty ?: 1.1f
+        )
+
+        val loadResult = engine.loadModelFromUri(uri, model.name, params)
         if (loadResult.isSuccess) {
+            val status = loadResult.getOrNull()
             repository.markLoaded(modelId)
+
+            if (status != null && (status.architecture != null || status.contextLength != null || status.parametersCount != null)) {
+                repository.updateMetadata(
+                    id = modelId,
+                    architecture = status.architecture ?: model.architecture,
+                    contextLength = status.contextLength ?: model.contextLength,
+                    parametersCount = status.parametersCount ?: model.parametersCount
+                )
+            }
+            AppLogger.i("LocalModelManager", "Transitioning state -> LOADED for '${model.name}'")
             Result.success(Unit)
         } else {
             val error = loadResult.exceptionOrNull() ?: Exception("Failed to load model")
+            AppLogger.e("LocalModelManager", "Transitioning state -> ERROR for '${model.name}': ${error.message}")
+            repository.updateStatus(modelId, LocalModelStatus.ERROR, error.message)
             Result.failure(error)
         }
     }
 
     override suspend fun unloadModel(modelId: String): Result<Unit> = withContext(Dispatchers.IO) {
-        engine.unload()
+        AppLogger.i("LocalModelManager", "Transitioning state -> UNLOADING for model $modelId")
+        repository.updateStatus(modelId, LocalModelStatus.UNLOADING)
+        val unloadResult = engine.unload()
         repository.markAllUnloaded()
-        AppLogger.i("LocalModelManager", "Model $modelId unloaded.")
-        Result.success(Unit)
+        AppLogger.i("LocalModelManager", "Transitioning state -> UNLOADED for model $modelId")
+        unloadResult
     }
 
     suspend fun deleteModel(modelId: String): Result<Unit> = withContext(Dispatchers.IO) {
@@ -111,25 +146,95 @@ class LocalModelManager(
         Result.success(Unit)
     }
 
+    private suspend fun buildInferenceParams(model: LocalModelInfo?): ModelInferenceParams {
+        val prefs = preferencesManager?.preferencesFlow?.firstOrNull()
+        return ModelInferenceParams(
+            contextLength = prefs?.localContextLength ?: (model?.contextLength ?: 2048),
+            maxTokens = prefs?.localMaxTokens ?: 512,
+            threads = prefs?.localCpuThreads ?: 4,
+            temperature = prefs?.temperature ?: 0.7f,
+            topP = prefs?.localTopP ?: 0.9f,
+            topK = prefs?.localTopK ?: 40,
+            repeatPenalty = prefs?.localRepeatPenalty ?: 1.1f
+        )
+    }
+
+    private suspend fun formatPromptWithTemplate(prompt: String, context: List<ChatMessage>): Pair<String, LocalModelInfo?> {
+        val loadedModel = repository.getCurrentlyLoadedModelSync()
+        val template = ChatTemplateFormatter.detectTemplate(
+            architecture = loadedModel?.architecture,
+            modelName = loadedModel?.name ?: "Bonsai"
+        )
+
+        val systemMsg = context.firstOrNull { it.isSystem }?.content ?: ""
+        val historyTurns = context.filter { !it.isSystem }
+
+        val formattedPrompt = ChatTemplateFormatter.format(
+            templateType = template,
+            systemPrompt = systemMsg,
+            contextHistory = historyTurns,
+            userPrompt = prompt
+        )
+
+        return Pair(formattedPrompt, loadedModel)
+    }
+
     override suspend fun generate(prompt: String, context: List<ChatMessage>): Result<String> {
-        val contextHistory = context.joinToString("\n") { "${it.role}: ${it.content}" }
-        return engine.generate(prompt, contextHistory)
+        val (formattedPrompt, loadedModel) = formatPromptWithTemplate(prompt, context)
+        val params = buildInferenceParams(loadedModel)
+        return engine.generate(formattedPrompt, "", params)
     }
 
     override fun streamGenerate(prompt: String, context: List<ChatMessage>): Flow<String> {
-        val contextHistory = context.joinToString("\n") { "${it.role}: ${it.content}" }
-        return engine.streamGenerate(prompt, contextHistory)
+        val loadedModel = kotlinx.coroutines.runBlocking { repository.getCurrentlyLoadedModelSync() }
+        val template = ChatTemplateFormatter.detectTemplate(
+            architecture = loadedModel?.architecture,
+            modelName = loadedModel?.name ?: "Bonsai"
+        )
+
+        val systemMsg = context.firstOrNull { it.isSystem }?.content ?: ""
+        val historyTurns = context.filter { !it.isSystem }
+
+        val formattedPrompt = ChatTemplateFormatter.format(
+            templateType = template,
+            systemPrompt = systemMsg,
+            contextHistory = historyTurns,
+            userPrompt = prompt
+        )
+
+        val prefs = kotlinx.coroutines.runBlocking { preferencesManager?.preferencesFlow?.firstOrNull() }
+        val params = ModelInferenceParams(
+            contextLength = prefs?.localContextLength ?: (loadedModel?.contextLength ?: 2048),
+            maxTokens = prefs?.localMaxTokens ?: 512,
+            threads = prefs?.localCpuThreads ?: 4,
+            temperature = prefs?.temperature ?: 0.7f,
+            topP = prefs?.localTopP ?: 0.9f,
+            topK = prefs?.localTopK ?: 40,
+            repeatPenalty = prefs?.localRepeatPenalty ?: 1.1f
+        )
+
+        return engine.streamGenerate(formattedPrompt, "", params)
+    }
+
+    override fun stopGeneration() {
+        engine.stopGeneration()
     }
 
     override fun getModelInfo(modelId: String): LocalModelInfo? {
-        return null // Will be queried via repository asynchronously
+        return kotlinx.coroutines.runBlocking { repository.getModelById(modelId) }
     }
 
     override fun isLoaded(): Boolean {
-        return false // Reactive state is tracked via repository.loadedModel
+        return engine.isLoaded()
+    }
+
+    fun getLatestGenerationDiagnostics(): GenerationDiagnostics? {
+        return engine.getLatestGenerationDiagnostics()
     }
 
     override fun releaseResources() {
-        // Cleanup if needed
+        kotlinx.coroutines.runBlocking {
+            engine.unload()
+        }
     }
 }

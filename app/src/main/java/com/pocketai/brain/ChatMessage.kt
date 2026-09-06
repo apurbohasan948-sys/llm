@@ -20,5 +20,10 @@ data class ChatMessage(
     val modelSource: ModelSourceType = ModelSourceType.LOCAL,
     val modelName: String? = null,
     val latencyMs: Long? = null,
-    val isStreaming: Boolean = false
-)
+    val isStreaming: Boolean = false,
+    val tokensPerSecond: Double? = null
+) {
+    val isUser: Boolean get() = role == MessageRole.USER
+    val isAssistant: Boolean get() = role == MessageRole.ASSISTANT
+    val isSystem: Boolean get() = role == MessageRole.SYSTEM
+}

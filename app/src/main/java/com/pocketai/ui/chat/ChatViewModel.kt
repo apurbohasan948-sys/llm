@@ -202,7 +202,8 @@ class ChatViewModel : ViewModel() {
                             timestamp = System.currentTimeMillis(),
                             modelSource = resolvedSource,
                             modelName = resolvedModelName,
-                            latencyMs = event.latencyMs
+                            latencyMs = event.latencyMs,
+                            tokensPerSecond = if (event.tokensPerSecond > 0) event.tokensPerSecond else null
                         )
                         conversationRepo.saveMessage(conversationId, assistantMessage)
                         _isStreaming.value = false
@@ -219,6 +220,7 @@ class ChatViewModel : ViewModel() {
     }
 
     fun stopGeneration() {
+        brainCore.stopGeneration()
         activeStreamingJob?.cancel()
         val partial = _streamingContent.value
         val conv = _currentConversation.value

@@ -42,7 +42,7 @@ class PocketAIApp : Application() {
     val localModelRepository by lazy { LocalModelRepository(database.localModelDao()) }
     val inferenceEngine by lazy { LlamaCppEngineBridge(this) }
     val localModelManager by lazy {
-        LocalModelManager(this, localModelRepository, inferenceEngine)
+        LocalModelManager(this, localModelRepository, inferenceEngine, preferencesManager)
     }
 
     val cloudModelRepository by lazy { CloudModelRepository(database.cloudProviderDao()) }
@@ -94,8 +94,9 @@ class PocketAIApp : Application() {
         instance = this
         AppLogger.i("PocketAIApp", "PocketAI application initialized.")
 
-        // Seed initial presets and restore Obsidian vault on IO scope
+        // Seed initial presets, restore Obsidian vault, and reset stale loaded states on IO scope
         CoroutineScope(Dispatchers.IO).launch {
+            localModelRepository.markAllUnloaded()
             seedInitialCloudPresets()
             restoreObsidianVault()
         }

@@ -36,6 +36,14 @@ class LocalModelRepository(private val dao: LocalModelDao) {
         dao.markLoaded(id)
     }
 
+    suspend fun updateStatus(id: String, status: LocalModelStatus, error: String? = null) {
+        dao.updateStatus(id, status.name, error)
+    }
+
+    suspend fun updateMetadata(id: String, architecture: String?, contextLength: Int?, parametersCount: String?) {
+        dao.updateModelMetadata(id, architecture, contextLength, parametersCount)
+    }
+
     suspend fun deleteModel(id: String) {
         dao.deleteModelById(id)
     }
@@ -56,10 +64,12 @@ class LocalModelRepository(private val dao: LocalModelDao) {
             architecture = architecture,
             quantization = quantization,
             contextLength = contextLength,
+            parametersCount = parametersCount,
             status = modelStatus,
             isLoaded = isLoaded,
             importTimestamp = importTimestamp,
-            memoryFootprintMb = (sizeBytes / (1024 * 1024))
+            memoryFootprintMb = (sizeBytes / (1024 * 1024)),
+            lastError = lastError
         )
     }
 
@@ -74,9 +84,11 @@ class LocalModelRepository(private val dao: LocalModelDao) {
             architecture = architecture,
             quantization = quantization,
             contextLength = contextLength,
+            parametersCount = parametersCount,
             status = status.name,
             isLoaded = isLoaded,
-            importTimestamp = importTimestamp
+            importTimestamp = importTimestamp,
+            lastError = lastError
         )
     }
 }

@@ -3,6 +3,7 @@ package com.pocketai.ui.models
 import android.net.Uri
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
@@ -28,16 +29,22 @@ import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.DeleteOutline
 import androidx.compose.material.icons.filled.FileDownload
 import androidx.compose.material.icons.filled.Memory
+import androidx.compose.material.icons.filled.Speed
+import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Slider
+import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Surface
@@ -48,15 +55,19 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.pocketai.local.LocalModelInfo
+import com.pocketai.local.LocalModelStatus
 import com.pocketai.ui.components.EmptyStateView
 import com.pocketai.ui.components.StatusBadge
 import com.pocketai.ui.settings.SettingsViewModel
@@ -64,6 +75,7 @@ import com.pocketai.ui.theme.AmberWarning
 import com.pocketai.ui.theme.CoralError
 import com.pocketai.ui.theme.CyberCyan
 import com.pocketai.ui.theme.EmeraldSuccess
+import kotlin.math.roundToInt
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -73,9 +85,14 @@ fun LocalModelsScreen(
 ) {
     val localModels by viewModel.localModels.collectAsState()
     val loadedModel by viewModel.loadedLocalModel.collectAsState()
+    val loadingModelId by viewModel.loadingModelId.collectAsState()
+    val preferences by viewModel.preferences.collectAsState()
     val operationMessage by viewModel.operationMessage.collectAsState()
     val snackbarHostState = remember { SnackbarHostState() }
     val diagnostics = remember { viewModel.getHardwareDiagnostics() }
+    val latestDiagnostics = viewModel.getLatestGenerationDiagnostics()
+
+    var showInferenceSettings by remember { mutableStateOf(false) }
 
     // SAF Document Picker for .gguf files
     val filePicker = rememberLauncherForActivityResult(
@@ -104,6 +121,16 @@ fun LocalModelsScreen(
                     }
                 },
                 actions = {
+                    IconButton(
+                        onClick = { showInferenceSettings = !showInferenceSettings },
+                        modifier = Modifier.testTag("toggle_settings_button")
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Tune,
+                            contentDescription = "Inference Settings",
+                            tint = if (showInferenceSettings) CyberCyan else MaterialTheme.colorScheme.onSurface
+                        )
+                    }
                     IconButton(
                         onClick = { filePicker.launch(arrayOf("*/*")) },
                         modifier = Modifier.testTag("import_model_icon_button")
@@ -135,6 +162,67 @@ fun LocalModelsScreen(
                 )
             }
 
+            // Real-Time Inference Performance Banner (if model was run)
+            if (latestDiagnostics != null && latestDiagnostics.tokensGenerated > 0) {
+                item {
+                    Card(
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = RoundedCornerShape(12.dp),
+                        colors = CardDefaults.cardColors(containerColor = CyberCyan.copy(alpha = 0.08f)),
+                        border = androidx.compose.foundation.BorderStroke(1.dp, CyberCyan.copy(alpha = 0.4f))
+                    ) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(14.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Icon(Icons.Default.Speed, contentDescription = null, tint = CyberCyan)
+                                Spacer(modifier = Modifier.width(10.dp))
+                                Column {
+                                    Text(
+                                        text = "Inference Diagnostics",
+                                        style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold)
+                                    )
+                                    Text(
+                                        text = "${latestDiagnostics.activeModelName} • ${latestDiagnostics.tokensGenerated} tokens in ${latestDiagnostics.generationTimeMs}ms",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
+                            }
+                            Text(
+                                text = String.format("%.1f tok/s", latestDiagnostics.tokensPerSecond),
+                                style = MaterialTheme.typography.titleMedium.copy(
+                                    fontWeight = FontWeight.Bold,
+                                    color = EmeraldSuccess
+                                )
+                            )
+                        }
+                    }
+                }
+            }
+
+            // Collapsible Inference Settings
+            item {
+                AnimatedVisibility(visible = showInferenceSettings) {
+                    InferenceSettingsCard(
+                        contextLength = preferences.localContextLength,
+                        maxTokens = preferences.localMaxTokens,
+                        threads = preferences.localCpuThreads,
+                        temperature = preferences.temperature,
+                        topP = preferences.localTopP,
+                        repeatPenalty = preferences.localRepeatPenalty,
+                        onSave = { ctx, maxTok, th, temp, topP, rep ->
+                            viewModel.updateLocalInferenceSettings(ctx, maxTok, th, temp, topP, rep)
+                            showInferenceSettings = false
+                        }
+                    )
+                }
+            }
+
             // Import CTA Banner
             item {
                 Button(
@@ -156,7 +244,7 @@ fun LocalModelsScreen(
                     EmptyStateView(
                         icon = Icons.Default.Memory,
                         title = "No Local Models Imported",
-                        description = "Download a GGUF model (e.g. bonsai-1.7b.gguf, llama-3.2-1b.gguf, qwen2.5-0.5b.gguf) to your phone storage, then tap 'Import Model File' above to load it into PocketAI.",
+                        description = "Download any GGUF model (e.g. Bonsai 1.7B, Qwen 2.5 0.5B, Llama 3.2 1B) to your phone storage, then tap 'Import Model File' to run 100% offline private AI inference.",
                         actionLabel = "Select GGUF File",
                         onAction = { filePicker.launch(arrayOf("*/*")) }
                     )
@@ -165,16 +253,22 @@ fun LocalModelsScreen(
                 item {
                     Text(
                         text = "IMPORTED MODELS (${localModels.size})",
-                        style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Bold, letterSpacing = 1.sp),
+                        style = MaterialTheme.typography.labelMedium.copy(
+                            fontWeight = FontWeight.Bold,
+                            letterSpacing = 1.sp
+                        ),
                         color = MaterialTheme.colorScheme.primary
                     )
                 }
 
                 items(localModels) { model ->
                     val isCurrentLoaded = loadedModel?.id == model.id
+                    val isCurrentLoading = loadingModelId == model.id || model.status == LocalModelStatus.LOADING
+
                     LocalModelCard(
                         model = model,
                         isLoaded = isCurrentLoaded,
+                        isLoading = isCurrentLoading,
                         onLoad = { viewModel.loadLocalModel(model.id) },
                         onUnload = { viewModel.unloadLocalModel(model.id) },
                         onDelete = { viewModel.deleteLocalModel(model.id) }
@@ -235,8 +329,16 @@ fun HardwareDiagnosticsCard(
 @Composable
 fun MetricColumn(label: String, value: String) {
     Column {
-        Text(text = label, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-        Text(text = value, style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.Bold), color = MaterialTheme.colorScheme.onSurface)
+        Text(
+            text = label,
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+        Text(
+            text = value,
+            style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.Bold),
+            color = MaterialTheme.colorScheme.onSurface
+        )
     }
 }
 
@@ -244,6 +346,7 @@ fun MetricColumn(label: String, value: String) {
 fun LocalModelCard(
     model: LocalModelInfo,
     isLoaded: Boolean,
+    isLoading: Boolean,
     onLoad: () -> Unit,
     onUnload: () -> Unit,
     onDelete: () -> Unit
@@ -265,38 +368,67 @@ fun LocalModelCard(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.SpaceBetween
             ) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier.weight(1f)
+                ) {
                     Box(
                         modifier = Modifier
-                            .size(36.dp)
+                            .size(38.dp)
                             .clip(CircleShape)
-                            .background(if (isLoaded) EmeraldSuccess.copy(alpha = 0.2f) else MaterialTheme.colorScheme.surfaceVariant),
+                            .background(
+                                if (isLoaded) EmeraldSuccess.copy(alpha = 0.2f)
+                                else if (model.status == LocalModelStatus.ERROR) CoralError.copy(alpha = 0.2f)
+                                else MaterialTheme.colorScheme.surfaceVariant
+                            ),
                         contentAlignment = Alignment.Center
                     ) {
-                        Icon(
-                            imageVector = if (isLoaded) Icons.Default.CheckCircle else Icons.Default.Memory,
-                            contentDescription = null,
-                            tint = if (isLoaded) EmeraldSuccess else MaterialTheme.colorScheme.onSurfaceVariant,
-                            modifier = Modifier.size(20.dp)
-                        )
+                        if (isLoading) {
+                            CircularProgressIndicator(
+                                modifier = Modifier.size(20.dp),
+                                strokeWidth = 2.dp,
+                                color = CyberCyan
+                            )
+                        } else {
+                            Icon(
+                                imageVector = if (isLoaded) Icons.Default.CheckCircle else Icons.Default.Memory,
+                                contentDescription = null,
+                                tint = if (isLoaded) EmeraldSuccess
+                                else if (model.status == LocalModelStatus.ERROR) CoralError
+                                else MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.size(20.dp)
+                            )
+                        }
                     }
                     Spacer(modifier = Modifier.width(12.dp))
                     Column {
                         Text(
                             text = model.name,
-                            style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold)
+                            style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
+                            maxLines = 1
                         )
                         Text(
                             text = model.fileName,
                             style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 1
                         )
                     }
                 }
 
                 StatusBadge(
-                    text = if (isLoaded) "LOADED" else "UNLOADED",
-                    color = if (isLoaded) EmeraldSuccess else MaterialTheme.colorScheme.onSurfaceVariant
+                    text = when {
+                        isLoading -> "LOADING..."
+                        isLoaded -> "LOADED"
+                        model.status == LocalModelStatus.ERROR -> "ERROR"
+                        else -> "UNLOADED"
+                    },
+                    color = when {
+                        isLoading -> AmberWarning
+                        isLoaded -> EmeraldSuccess
+                        model.status == LocalModelStatus.ERROR -> CoralError
+                        else -> MaterialTheme.colorScheme.onSurfaceVariant
+                    }
                 )
             }
 
@@ -317,6 +449,18 @@ fun LocalModelCard(
                 if (!model.quantization.isNullOrBlank()) {
                     StatusBadge(text = model.quantization, color = AmberWarning)
                 }
+                if (!model.parametersCount.isNullOrBlank()) {
+                    StatusBadge(text = model.parametersCount, color = MaterialTheme.colorScheme.primary)
+                }
+            }
+
+            // Error display if present
+            if (!model.lastError.isNullOrBlank()) {
+                Spacer(modifier = Modifier.height(8.dp))
+                Text(
+                    text = model.lastError,
+                    style = MaterialTheme.typography.bodySmall.copy(color = CoralError)
+                )
             }
 
             Spacer(modifier = Modifier.height(16.dp))
@@ -349,12 +493,103 @@ fun LocalModelCard(
                 } else {
                     Button(
                         onClick = onLoad,
+                        enabled = !isLoading,
                         colors = ButtonDefaults.buttonColors(containerColor = EmeraldSuccess),
                         shape = RoundedCornerShape(8.dp)
                     ) {
-                        Text("Load Model", fontWeight = FontWeight.SemiBold)
+                        if (isLoading) {
+                            CircularProgressIndicator(
+                                modifier = Modifier.size(16.dp),
+                                strokeWidth = 2.dp,
+                                color = Color.White
+                            )
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text("Loading RAM...", fontWeight = FontWeight.SemiBold)
+                        } else {
+                            Text("Load Model", fontWeight = FontWeight.SemiBold)
+                        }
                     }
                 }
+            }
+        }
+    }
+}
+
+@Composable
+fun InferenceSettingsCard(
+    contextLength: Int,
+    maxTokens: Int,
+    threads: Int,
+    temperature: Float,
+    topP: Float,
+    repeatPenalty: Float,
+    onSave: (Int, Int, Int, Float, Float, Float) -> Unit
+) {
+    var ctx by remember { mutableStateOf(contextLength.toFloat()) }
+    var maxTok by remember { mutableStateOf(maxTokens.toFloat()) }
+    var th by remember { mutableStateOf(threads.toFloat()) }
+    var temp by remember { mutableStateOf(temperature) }
+    var p by remember { mutableStateOf(topP) }
+    var rep by remember { mutableStateOf(repeatPenalty) }
+
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(12.dp),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f)),
+        border = androidx.compose.foundation.BorderStroke(1.dp, CyberCyan.copy(alpha = 0.5f))
+    ) {
+        Column(modifier = Modifier.padding(16.dp)) {
+            Text(
+                text = "Inference Parameters",
+                style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold, color = CyberCyan)
+            )
+            Spacer(modifier = Modifier.height(12.dp))
+
+            Text("Context Length: ${ctx.roundToInt()} tokens", style = MaterialTheme.typography.labelMedium)
+            Slider(
+                value = ctx,
+                onValueChange = { ctx = it },
+                valueRange = 512f..8192f,
+                steps = 14,
+                colors = SliderDefaults.colors(thumbColor = CyberCyan, activeTrackColor = CyberCyan)
+            )
+
+            Text("Max Output Tokens: ${maxTok.roundToInt()}", style = MaterialTheme.typography.labelMedium)
+            Slider(
+                value = maxTok,
+                onValueChange = { maxTok = it },
+                valueRange = 128f..2048f,
+                steps = 14,
+                colors = SliderDefaults.colors(thumbColor = CyberCyan, activeTrackColor = CyberCyan)
+            )
+
+            Text("CPU Threads: ${th.roundToInt()} cores", style = MaterialTheme.typography.labelMedium)
+            Slider(
+                value = th,
+                onValueChange = { th = it },
+                valueRange = 1f..8f,
+                steps = 6,
+                colors = SliderDefaults.colors(thumbColor = CyberCyan, activeTrackColor = CyberCyan)
+            )
+
+            Text(String.format("Temperature: %.2f", temp), style = MaterialTheme.typography.labelMedium)
+            Slider(
+                value = temp,
+                onValueChange = { temp = it },
+                valueRange = 0.1f..1.5f,
+                steps = 13,
+                colors = SliderDefaults.colors(thumbColor = CyberCyan, activeTrackColor = CyberCyan)
+            )
+
+            Spacer(modifier = Modifier.height(8.dp))
+
+            Button(
+                onClick = { onSave(ctx.roundToInt(), maxTok.roundToInt(), th.roundToInt(), temp, p, rep) },
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(8.dp),
+                colors = ButtonDefaults.buttonColors(containerColor = CyberCyan)
+            ) {
+                Text("Save Inference Parameters", fontWeight = FontWeight.Bold)
             }
         }
     }

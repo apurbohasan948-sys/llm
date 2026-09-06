@@ -25,7 +25,7 @@ import com.pocketai.data.local.database.entities.RobotConfigEntity
         ChatMessageEntity::class,
         RobotConfigEntity::class
     ],
-    version = 1,
+    version = 2,
     exportSchema = false
 )
 abstract class PocketAIDatabase : RoomDatabase() {

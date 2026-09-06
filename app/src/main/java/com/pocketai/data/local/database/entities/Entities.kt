@@ -27,10 +27,12 @@ data class LocalModelEntity(
     val architecture: String? = null,
     val quantization: String? = null,
     val contextLength: Int? = null,
-    val status: String = "UNLOADED", // UNLOADED, LOADING, LOADED, ERROR
+    val status: String = "UNLOADED", // NOT_IMPORTED, IMPORTED, LOADING, LOADED, UNLOADED, UNLOADING, ERROR
     val isLoaded: Boolean = false,
     val importTimestamp: Long = System.currentTimeMillis(),
-    val lastLoadedTimestamp: Long? = null
+    val lastLoadedTimestamp: Long? = null,
+    val parametersCount: String? = null,
+    val lastError: String? = null
 )
 
 @Entity(tableName = "cloud_providers")

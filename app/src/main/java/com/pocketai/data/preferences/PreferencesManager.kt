@@ -33,7 +33,13 @@ data class AppPreferences(
     val isMemoryEnabled: Boolean = true,
     val systemPrompt: String = DEFAULT_SYSTEM_PROMPT,
     val themeMode: ThemeMode = ThemeMode.DARK,
-    val temperature: Float = 0.7f
+    val temperature: Float = 0.7f,
+    val localContextLength: Int = 2048,
+    val localMaxTokens: Int = 512,
+    val localCpuThreads: Int = 4,
+    val localTopP: Float = 0.9f,
+    val localTopK: Int = 40,
+    val localRepeatPenalty: Float = 1.1f
 ) {
     companion object {
         const val DEFAULT_SYSTEM_PROMPT =
@@ -53,6 +59,12 @@ class PreferencesManager(private val context: Context) {
         val SYSTEM_PROMPT = stringPreferencesKey("system_prompt")
         val THEME_MODE = stringPreferencesKey("theme_mode")
         val TEMPERATURE = androidx.datastore.preferences.core.floatPreferencesKey("temperature")
+        val LOCAL_CONTEXT_LENGTH = androidx.datastore.preferences.core.intPreferencesKey("local_context_length")
+        val LOCAL_MAX_TOKENS = androidx.datastore.preferences.core.intPreferencesKey("local_max_tokens")
+        val LOCAL_CPU_THREADS = androidx.datastore.preferences.core.intPreferencesKey("local_cpu_threads")
+        val LOCAL_TOP_P = androidx.datastore.preferences.core.floatPreferencesKey("local_top_p")
+        val LOCAL_TOP_K = androidx.datastore.preferences.core.intPreferencesKey("local_top_k")
+        val LOCAL_REPEAT_PENALTY = androidx.datastore.preferences.core.floatPreferencesKey("local_repeat_penalty")
     }
 
     val preferencesFlow: Flow<AppPreferences> = context.dataStore.data.map { prefs ->
@@ -69,7 +81,13 @@ class PreferencesManager(private val context: Context) {
             themeMode = prefs[Keys.THEME_MODE]?.let {
                 try { ThemeMode.valueOf(it) } catch (_: Exception) { ThemeMode.DARK }
             } ?: ThemeMode.DARK,
-            temperature = prefs[Keys.TEMPERATURE] ?: 0.7f
+            temperature = prefs[Keys.TEMPERATURE] ?: 0.7f,
+            localContextLength = prefs[Keys.LOCAL_CONTEXT_LENGTH] ?: 2048,
+            localMaxTokens = prefs[Keys.LOCAL_MAX_TOKENS] ?: 512,
+            localCpuThreads = prefs[Keys.LOCAL_CPU_THREADS] ?: 4,
+            localTopP = prefs[Keys.LOCAL_TOP_P] ?: 0.9f,
+            localTopK = prefs[Keys.LOCAL_TOP_K] ?: 40,
+            localRepeatPenalty = prefs[Keys.LOCAL_REPEAT_PENALTY] ?: 1.1f
         )
     }
 
@@ -116,5 +134,23 @@ class PreferencesManager(private val context: Context) {
 
     suspend fun setTemperature(temperature: Float) {
         context.dataStore.edit { it[Keys.TEMPERATURE] = temperature }
+    }
+
+    suspend fun setLocalInferenceConfig(
+        contextLength: Int,
+        maxTokens: Int,
+        threads: Int,
+        temperature: Float,
+        topP: Float,
+        repeatPenalty: Float
+    ) {
+        context.dataStore.edit {
+            it[Keys.LOCAL_CONTEXT_LENGTH] = contextLength
+            it[Keys.LOCAL_MAX_TOKENS] = maxTokens
+            it[Keys.LOCAL_CPU_THREADS] = threads
+            it[Keys.TEMPERATURE] = temperature
+            it[Keys.LOCAL_TOP_P] = topP
+            it[Keys.LOCAL_REPEAT_PENALTY] = repeatPenalty
+        }
     }
 }

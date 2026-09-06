@@ -40,4 +40,16 @@ sealed class PocketAIException(
 
     class DatabaseException(val details: String) :
         PocketAIException("Database operation failed: $details")
+
+    class InvalidGgufException(val reason: String) :
+        PocketAIException("Invalid GGUF file: $reason")
+
+    class NativeEngineUnavailableException(val reason: String) :
+        PocketAIException("Native inference engine is unavailable: $reason")
+
+    class InferenceGenerationException(val reason: String) :
+        PocketAIException("Local inference error: $reason")
+
+    class StoragePermissionException(val uri: String) :
+        PocketAIException("Permission denied to read model file at '$uri'. Please re-import the file.")
 }

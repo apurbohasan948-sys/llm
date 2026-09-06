@@ -29,7 +29,7 @@ class ModelRouterTest {
             name = "Bonsai 1.7B",
             fileName = "bonsai-1.7b.gguf",
             fileUri = "content://test/bonsai",
-            fileSizeBytes = 1_500_000_000L,
+            sizeBytes = 1_500_000_000L,
             quantization = "Q4_K_M",
             architecture = "llama",
             contextLength = 4096,

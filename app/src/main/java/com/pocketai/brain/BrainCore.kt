@@ -9,7 +9,11 @@ import kotlinx.coroutines.flow.flow
 sealed class BrainStreamEvent {
     data class Metadata(val source: ModelSourceType, val modelName: String) : BrainStreamEvent()
     data class Chunk(val text: String) : BrainStreamEvent()
-    data class Complete(val fullResponse: String, val latencyMs: Long) : BrainStreamEvent()
+    data class Complete(
+        val fullResponse: String,
+        val latencyMs: Long,
+        val tokensPerSecond: Double = 0.0
+    ) : BrainStreamEvent()
     data class Error(val message: String, val cause: Throwable? = null) : BrainStreamEvent()
 }
 
@@ -20,6 +24,11 @@ class BrainCore(
     private val localModelManager: LocalModelManager,
     private val cloudProviderManager: CloudProviderManager
 ) {
+
+    fun stopGeneration() {
+        AppLogger.i("BrainCore", "Stop generation requested")
+        localModelManager.stopGeneration()
+    }
 
     /**
      * Central entry point to stream AI responses.
@@ -72,7 +81,8 @@ class BrainCore(
             }
 
             val latency = System.currentTimeMillis() - startTime
-            emit(BrainStreamEvent.Complete(fullResponseBuilder.toString(), latency))
+            val tokPerSec = localModelManager.getLatestGenerationDiagnostics()?.tokensPerSecond ?: 0.0
+            emit(BrainStreamEvent.Complete(fullResponseBuilder.toString(), latency, tokPerSec))
         } catch (e: Exception) {
             AppLogger.e("BrainCore", "Inference orchestration failed: ${e.message}", e)
             emit(BrainStreamEvent.Error(e.message ?: "An unexpected error occurred during inference.", e))
