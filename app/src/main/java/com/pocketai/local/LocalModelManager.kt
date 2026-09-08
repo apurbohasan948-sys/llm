@@ -48,12 +48,40 @@ class LocalModelManager(
                 }
             }
 
-            // Inspect GGUF header
-            val metadata = context.contentResolver.openInputStream(uri)?.use { stream ->
-                GgufHeaderParser.parse(stream)
+            // Ensure app-private models directory
+            val modelsDir = java.io.File(context.filesDir, "models").apply {
+                if (!exists()) mkdirs()
+            }
+            val cleanFileName = if (displayName.endsWith(".gguf", ignoreCase = true)) displayName else "$displayName.gguf"
+            val safeFileName = cleanFileName.replace(Regex("[^a-zA-Z0-9._-]"), "_")
+            val localModelFile = java.io.File(modelsDir, safeFileName)
+
+            // Copy to local app-private storage if not already present or if incomplete
+            if (!localModelFile.exists() || localModelFile.length() == 0L || (fileSize > 0 && localModelFile.length() != fileSize)) {
+                AppLogger.i("LocalModelManager", "Copying SAF model to local storage: ${localModelFile.absolutePath}")
+                val tempFile = java.io.File(modelsDir, "${safeFileName}.tmp.${System.currentTimeMillis()}")
+                val stream = context.contentResolver.openInputStream(uri)
+                    ?: throw PocketAIException.ModelNotFoundException("Failed to open input stream for $uri")
+                tempFile.outputStream().use { out ->
+                    stream.use { inp ->
+                        inp.copyTo(out, bufferSize = 64 * 1024)
+                    }
+                }
+                if (localModelFile.exists()) localModelFile.delete()
+                if (!tempFile.renameTo(localModelFile)) {
+                    tempFile.copyTo(localModelFile, overwrite = true)
+                    tempFile.delete()
+                }
             }
 
-            val cleanModelName = displayName.removeSuffix(".gguf")
+            fileSize = localModelFile.length()
+
+            // Inspect GGUF header from local file
+            val metadata = localModelFile.inputStream().use { stream ->
+                GgufHeaderParser.parse(stream, cleanFileName)
+            }
+
+            val cleanModelName = displayName.removeSuffix(".gguf").removeSuffix(".GGUF")
                 .replace("-", " ")
                 .replace("_", " ")
                 .split(" ")
@@ -63,19 +91,19 @@ class LocalModelManager(
                 id = UUID.randomUUID().toString(),
                 name = cleanModelName,
                 fileName = displayName,
-                fileUri = uri.toString(),
-                format = if (metadata?.isValidGguf == true) "GGUF v${metadata.version}" else "GGUF",
+                fileUri = Uri.fromFile(localModelFile).toString(),
+                format = if (metadata.isValidGguf) "GGUF v${metadata.version}" else "GGUF",
                 sizeBytes = fileSize,
-                architecture = metadata?.architecture ?: "transformer",
-                quantization = metadata?.quantization,
-                contextLength = metadata?.contextLength ?: 2048,
+                architecture = metadata.architecture ?: "transformer",
+                quantization = metadata.quantization,
+                contextLength = metadata.contextLength ?: 2048,
                 status = LocalModelStatus.IMPORTED,
                 isLoaded = false,
                 importTimestamp = System.currentTimeMillis()
             )
 
             repository.saveModel(modelInfo)
-            AppLogger.i("LocalModelManager", "Imported model '$cleanModelName' (${fileSize / (1024 * 1024)}MB)")
+            AppLogger.i("LocalModelManager", "Imported model '$cleanModelName' (${fileSize / (1024 * 1024)}MB) stored at ${localModelFile.absolutePath}")
             Result.success(modelInfo)
         } catch (e: Exception) {
             AppLogger.e("LocalModelManager", "Failed to import model from URI: ${e.message}", e)
@@ -140,6 +168,22 @@ class LocalModelManager(
         val model = repository.getModelById(modelId)
         if (model?.isLoaded == true) {
             unloadModel(modelId)
+        }
+        // Cleanup local file if stored in app private storage
+        try {
+            val uriStr = model?.fileUri
+            if (uriStr != null) {
+                val uri = Uri.parse(uriStr)
+                if (uri.scheme == "file" && uri.path != null) {
+                    val file = java.io.File(uri.path!!)
+                    if (file.exists() && file.canonicalPath.startsWith(context.filesDir.canonicalPath)) {
+                        file.delete()
+                        AppLogger.i("LocalModelManager", "Deleted local model file: ${file.absolutePath}")
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            AppLogger.w("LocalModelManager", "Could not delete local file for model $modelId: ${e.message}")
         }
         repository.deleteModel(modelId)
         AppLogger.i("LocalModelManager", "Model $modelId deleted from registry.")

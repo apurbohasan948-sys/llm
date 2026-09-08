@@ -3,6 +3,8 @@ package com.pocketai.local.engines
 import android.app.ActivityManager
 import android.content.Context
 import android.net.Uri
+import android.os.ParcelFileDescriptor
+import android.provider.OpenableColumns
 import com.pocketai.core.error.PocketAIException
 import com.pocketai.core.logging.AppLogger
 import kotlinx.coroutines.CancellationException
@@ -14,12 +16,13 @@ import kotlinx.coroutines.flow.channelFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.nehuatl.llamacpp.LlamaAndroid
+import java.io.File
 import java.util.concurrent.atomic.AtomicInteger
 
 /**
  * Production bridge for on-device GGUF inference powered by llama.cpp.
- * Bridges Android ContentResolver ParcelFileDescriptors directly to native
- * llama.cpp contexts without copying large model files into internal app storage.
+ * Loads models from reliable local filesystem storage with conservative
+ * memory and CPU configurations to ensure stability on mobile hardware.
  */
 class LlamaCppEngineBridge(private val context: Context) : InferenceEngine {
 
@@ -96,13 +99,161 @@ class LlamaCppEngineBridge(private val context: Context) : InferenceEngine {
         )
     }
 
+    private fun validateGgufHeader(file: File): Boolean {
+        return try {
+            file.inputStream().use { stream ->
+                val magicBytes = ByteArray(4)
+                var total = 0
+                while (total < 4) {
+                    val r = stream.read(magicBytes, total, 4 - total)
+                    if (r == -1) return false
+                    total += r
+                }
+                // GGUF magic is 0x46554747 in little-endian ('G', 'G', 'U', 'F')
+                magicBytes[0] == 'G'.code.toByte() &&
+                magicBytes[1] == 'G'.code.toByte() &&
+                magicBytes[2] == 'U'.code.toByte() &&
+                magicBytes[3] == 'F'.code.toByte()
+            }
+        } catch (e: Exception) {
+            false
+        }
+    }
+
+    private fun queryDisplayName(uri: Uri): String? {
+        if (uri.scheme == "file") return uri.lastPathSegment
+        return try {
+            context.contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { cursor ->
+                if (cursor.moveToFirst()) {
+                    val idx = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+                    if (idx != -1) cursor.getString(idx) else null
+                } else null
+            }
+        } catch (e: Exception) {
+            null
+        }
+    }
+
+    private fun queryFileSize(uri: Uri): Long {
+        if (uri.scheme == "file") {
+            return uri.path?.let { File(it).length() } ?: 0L
+        }
+        return try {
+            context.contentResolver.query(uri, arrayOf(OpenableColumns.SIZE), null, null, null)?.use { cursor ->
+                if (cursor.moveToFirst()) {
+                    val idx = cursor.getColumnIndex(OpenableColumns.SIZE)
+                    if (idx != -1) cursor.getLong(idx) else 0L
+                } else 0L
+            } ?: 0L
+        } catch (e: Exception) {
+            0L
+        }
+    }
+
+    private fun ensureLocalModelFile(uri: Uri, modelName: String): File {
+        val modelsDir = File(context.filesDir, "models").apply {
+            if (!exists()) mkdirs()
+        }
+
+        // If the URI is already a local file path inside storage
+        if (uri.scheme == "file" && uri.path != null) {
+            val existingFile = File(uri.path!!)
+            if (existingFile.exists() && existingFile.length() > 0) {
+                if (validateGgufHeader(existingFile)) {
+                    AppLogger.i("LlamaCppEngineBridge", "GGUF_HEADER_VALID: GGUF magic verified for ${existingFile.name}")
+                    AppLogger.i("LlamaCppEngineBridge", "MODEL_FILE_VALIDATED: Using existing local file: ${existingFile.absolutePath} (${existingFile.length()} bytes)")
+                    return existingFile
+                } else {
+                    AppLogger.w("LlamaCppEngineBridge", "File at ${existingFile.absolutePath} failed GGUF magic verification")
+                }
+            }
+        }
+
+        // Determine deterministic file name for local storage
+        val queryName = queryDisplayName(uri) ?: modelName
+        val cleanName = if (queryName.endsWith(".gguf", ignoreCase = true)) queryName else "$queryName.gguf"
+        val safeFileName = cleanName.replace(Regex("[^a-zA-Z0-9._-]"), "_")
+        val targetFile = File(modelsDir, safeFileName)
+        val expectedSize = queryFileSize(uri)
+
+        // If target file already exists and is valid, reuse it to avoid duplicate copies
+        if (targetFile.exists() && targetFile.length() > 0) {
+            val matchesSize = expectedSize <= 0 || targetFile.length() == expectedSize
+            if (matchesSize && validateGgufHeader(targetFile)) {
+                AppLogger.i("LlamaCppEngineBridge", "GGUF_HEADER_VALID: GGUF magic verified for ${targetFile.name}")
+                AppLogger.i("LlamaCppEngineBridge", "MODEL_FILE_VALIDATED: Deterministic local model file already exists: ${targetFile.absolutePath} (${targetFile.length()} bytes)")
+                return targetFile
+            }
+        }
+
+        // Copy bytes from ContentResolver to app-private storage
+        AppLogger.i("LlamaCppEngineBridge", "LOCAL_MODEL_COPY_START: Copying $uri to ${targetFile.absolutePath}")
+        val tempFile = File(modelsDir, "${safeFileName}.tmp.${System.currentTimeMillis()}")
+        try {
+            val inputStream = context.contentResolver.openInputStream(uri)
+                ?: throw PocketAIException.ModelNotFoundException("Failed to open input stream for $uri")
+
+            val buffer = ByteArray(64 * 1024)
+            var totalCopied = 0L
+            tempFile.outputStream().use { outputStream ->
+                inputStream.use { stream ->
+                    var bytesRead: Int
+                    while (stream.read(buffer).also { bytesRead = it } != -1) {
+                        outputStream.write(buffer, 0, bytesRead)
+                        totalCopied += bytesRead
+                    }
+                    outputStream.flush()
+                }
+            }
+
+            if (targetFile.exists()) {
+                targetFile.delete()
+            }
+            val renamed = tempFile.renameTo(targetFile)
+            if (!renamed) {
+                tempFile.copyTo(targetFile, overwrite = true)
+                tempFile.delete()
+            }
+
+            AppLogger.i("LlamaCppEngineBridge", "LOCAL_MODEL_COPY_SUCCESS: Copied $totalCopied bytes to ${targetFile.absolutePath}")
+        } catch (e: Exception) {
+            if (tempFile.exists()) tempFile.delete()
+            AppLogger.e("LlamaCppEngineBridge", "Failed during local model copy: ${e.message}", e)
+            throw e
+        }
+
+        // Verify copied file existence and size
+        if (!targetFile.exists() || targetFile.length() == 0L) {
+            throw PocketAIException.ModelNotFoundException("Copied local model file does not exist or is empty: ${targetFile.absolutePath}")
+        }
+
+        if (expectedSize > 0 && targetFile.length() != expectedSize) {
+            AppLogger.w("LlamaCppEngineBridge", "Warning: Copied file size (${targetFile.length()}) differs from SAF reported size ($expectedSize)")
+        }
+
+        // Verify GGUF header
+        if (!validateGgufHeader(targetFile)) {
+            AppLogger.e("LlamaCppEngineBridge", "GGUF header validation failed on copied file: ${targetFile.absolutePath}")
+            targetFile.delete()
+            throw PocketAIException.ModelLoadFailedException(modelName, "Copied file is not in valid GGUF format")
+        }
+
+        AppLogger.i("LlamaCppEngineBridge", "GGUF_HEADER_VALID: GGUF magic verified for ${targetFile.name}")
+        AppLogger.i("LlamaCppEngineBridge", "MODEL_FILE_VALIDATED: Verified local model file at ${targetFile.absolutePath} (${targetFile.length()} bytes)")
+        return targetFile
+    }
+
     override suspend fun loadModelFromUri(
         uri: Uri,
         modelName: String,
         params: ModelInferenceParams
     ): Result<EngineStatus> = withContext(Dispatchers.IO) {
+        AppLogger.i("LlamaCppEngineBridge", "MODEL_LOAD_START: modelName='$modelName', uri='$uri'")
+        AppLogger.i("LlamaCppEngineBridge", "SAF_URI_RECEIVED: $uri")
+
         try {
             if (!isNativeEngineAvailable) {
+                AppLogger.e("LlamaCppEngineBridge", "MODEL_LOAD_FAILED: llama.cpp native binary is not available on this device runtime.")
                 return@withContext Result.failure(
                     PocketAIException.NativeEngineUnavailableException(
                         "llama.cpp native binary is not available on this device runtime."
@@ -110,157 +261,168 @@ class LlamaCppEngineBridge(private val context: Context) : InferenceEngine {
                 )
             }
 
-            val diagnostics = getHardwareDiagnostics()
-            AppLogger.i(
-                "LlamaCppEngineBridge",
-                "Initiating load for '$modelName' (URI: $uri). Free RAM: ${diagnostics.availableRamMb}MB"
-            )
-
-            val effectiveUri = when {
-                uri.scheme == null || uri.scheme?.isEmpty() == true -> Uri.fromFile(java.io.File(uri.path ?: uri.toString()))
-                else -> uri
+            val localFile = try {
+                ensureLocalModelFile(uri, modelName)
+            } catch (e: Exception) {
+                AppLogger.e("LlamaCppEngineBridge", "MODEL_LOAD_FAILED: Failed to ensure local model file: ${e.message}", e)
+                return@withContext Result.failure(e)
             }
 
-            // Open ParcelFileDescriptor in read mode via ContentResolver with fallback to File PFD
-            val pfd = try {
-                context.contentResolver.openFileDescriptor(effectiveUri, "r")
-                    ?: if (effectiveUri.scheme == "file" && effectiveUri.path != null) {
-                        android.os.ParcelFileDescriptor.open(
-                            java.io.File(effectiveUri.path!!),
-                            android.os.ParcelFileDescriptor.MODE_READ_ONLY
-                        )
-                    } else null
-            } catch (e: Exception) {
-                if (effectiveUri.scheme == "file" && effectiveUri.path != null) {
-                    try {
-                        android.os.ParcelFileDescriptor.open(
-                            java.io.File(effectiveUri.path!!),
-                            android.os.ParcelFileDescriptor.MODE_READ_ONLY
-                        )
-                    } catch (e2: Exception) {
-                        AppLogger.e("LlamaCppEngineBridge", "Failed to open descriptor for $effectiveUri: ${e2.message}")
-                        return@withContext Result.failure(
-                            PocketAIException.StoragePermissionException(effectiveUri.toString())
-                        )
-                    }
-                } else {
-                    AppLogger.e("LlamaCppEngineBridge", "Failed to open descriptor for $effectiveUri: ${e.message}")
-                    return@withContext Result.failure(
-                        PocketAIException.StoragePermissionException(effectiveUri.toString())
-                    )
-                }
-            } ?: return@withContext Result.failure(
-                PocketAIException.ModelNotFoundException("Cannot open descriptor for $effectiveUri")
-            )
-
-            val fileSizeBytes = pfd.statSize
+            val fileSizeBytes = localFile.length()
             val fileSizeMb = fileSizeBytes / (1024 * 1024)
+            val diagnostics = getHardwareDiagnostics()
 
-            // Memory headroom validation before taking over memory
-            if (fileSizeMb > diagnostics.availableRamMb) {
-                pfd.close()
+            // Conservative parameters for Android CPU stability
+            val effectiveContextLength = if (params.contextLength > 0) params.contextLength else 2048
+            val effectiveThreads = if (params.threads > 0) params.threads.coerceIn(2, 4) else diagnostics.processorCores.coerceIn(2, 4)
+
+            // Safe memory calculation: model weights + KV cache headroom (approx 250MB for 2048 context)
+            val estimatedKvCacheMb = (effectiveContextLength * 4) / 1024 + 100
+            val requiredMemoryMb = fileSizeMb + estimatedKvCacheMb
+
+            if (diagnostics.availableRamMb < requiredMemoryMb) {
+                val errorMsg = "Insufficient RAM for '$modelName'. Required: ~${requiredMemoryMb}MB (Model: ${fileSizeMb}MB + Context: ${estimatedKvCacheMb}MB), Available: ${diagnostics.availableRamMb}MB"
+                AppLogger.e("LlamaCppEngineBridge", "MODEL_LOAD_FAILED: $errorMsg")
                 return@withContext Result.failure(
                     PocketAIException.InsufficientMemoryException(
-                        requiredMb = fileSizeMb,
+                        requiredMb = requiredMemoryMb,
                         availableMb = diagnostics.availableRamMb
                     )
                 )
             }
 
-            // If a previous model is loaded in memory, release it first
+            // If another model is currently loaded in memory, release it first
             if (isCurrentlyLoaded) {
                 unload()
             }
 
             val loadStartTime = System.currentTimeMillis()
+            AppLogger.i("LlamaCppEngineBridge", "NATIVE_ENGINE_START: Initializing llama.cpp engine for '${localFile.name}'")
 
-            // Detach the native file descriptor so the native llama.cpp engine can map it directly
-            val fd = pfd.detachFd()
-
-            val effectiveContextLength = if (params.contextLength > 0) params.contextLength else 2048
-            val effectiveThreads = if (params.threads > 0) params.threads else diagnostics.processorCores.coerceIn(2, 6)
-
-            val startParams = mutableMapOf<String, Any>(
-                "model" to effectiveUri.toString(),
-                "model_fd" to fd,
-                "n_ctx" to effectiveContextLength,
-                "n_batch" to 512,
-                "n_threads" to effectiveThreads,
-                "n_gpu_layers" to 0,
-                "use_mmap" to true,
-                "use_mlock" to false,
-                "embedding" to false,
-                "vocab_only" to false,
-                "lora" to "",
-                "lora_scaled" to 1.0,
-                "rope_freq_base" to 0.0,
-                "rope_freq_scale" to 0.0
-            )
-
-            val engine = getLlamaAndroid()
-            try {
-                engine.setContextLimit(4)
-            } catch (e: Throwable) {
-                // Ignore if not supported
-            }
-
-            val tokenForwarder: (String) -> Unit = { token ->
-                currentTokenListener?.invoke(token)
-            }
-
-            val startResult = engine.startEngine(startParams, tokenForwarder)
-            if (startResult == null || !startResult.containsKey("contextId")) {
+            val pfd = try {
+                ParcelFileDescriptor.open(localFile, ParcelFileDescriptor.MODE_READ_ONLY)
+            } catch (e: Exception) {
+                AppLogger.e("LlamaCppEngineBridge", "MODEL_LOAD_FAILED: Cannot open ParcelFileDescriptor: ${e.message}", e)
                 return@withContext Result.failure(
-                    PocketAIException.ModelLoadFailedException(
-                        modelName,
-                        "Native llama.cpp engine failed to initialize context from GGUF weights."
-                    )
+                    PocketAIException.StoragePermissionException("Cannot open file descriptor for ${localFile.absolutePath}: ${e.message}")
                 )
             }
 
-            val contextId = (startResult["contextId"] as? Number)?.toInt()
-                ?: return@withContext Result.failure(
-                    PocketAIException.ModelLoadFailedException(
-                        modelName,
-                        "Engine returned an invalid native context identifier."
+            // Detach raw file descriptor: native initContextWithFd takes ownership of this FD, dups it, and closes it
+            val fd = pfd.detachFd()
+            var nativeTookOwnership = false
+
+            try {
+                val fileUriString = Uri.fromFile(localFile).toString()
+
+                val startParams = mutableMapOf<String, Any>(
+                    "model" to fileUriString,
+                    "model_fd" to fd,
+                    "n_ctx" to effectiveContextLength,
+                    "n_batch" to 512,
+                    "n_threads" to effectiveThreads,
+                    "n_gpu_layers" to 0,
+                    "use_mmap" to true,
+                    "use_mlock" to false,
+                    "embedding" to false,
+                    "vocab_only" to false,
+                    "lora" to "",
+                    "lora_scaled" to 1.0,
+                    "rope_freq_base" to 0.0,
+                    "rope_freq_scale" to 0.0
+                )
+
+                val engine = getLlamaAndroid()
+                // Limit simultaneous active contexts to 1 for mobile memory safety
+                try {
+                    engine.setContextLimit(1)
+                } catch (_: Throwable) {
+                    // Ignore if setContextLimit is not supported
+                }
+
+                val tokenForwarder: (String) -> Unit = { token ->
+                    currentTokenListener?.invoke(token)
+                }
+
+                AppLogger.i("LlamaCppEngineBridge", "CONTEXT_CREATE_START: Calling startEngine for '${localFile.name}' (ctx: $effectiveContextLength, threads: $effectiveThreads, n_gpu_layers: 0)")
+
+                val startResult = engine.startEngine(startParams, tokenForwarder)
+                nativeTookOwnership = true
+
+                if (startResult == null || !startResult.containsKey("contextId")) {
+                    AppLogger.e("LlamaCppEngineBridge", "MODEL_LOAD_FAILED: startEngine returned null or missing contextId")
+                    return@withContext Result.failure(
+                        PocketAIException.ModelLoadFailedException(
+                            modelName,
+                            "Native llama.cpp engine failed to initialize context from GGUF weights."
+                        )
+                    )
+                }
+
+                val contextId = (startResult["contextId"] as? Number)?.toInt()
+                if (contextId == null || contextId <= 0) {
+                    AppLogger.e("LlamaCppEngineBridge", "MODEL_LOAD_FAILED: Engine returned an invalid native context identifier: $contextId")
+                    return@withContext Result.failure(
+                        PocketAIException.ModelLoadFailedException(
+                            modelName,
+                            "Engine returned an invalid native context identifier: $contextId"
+                        )
+                    )
+                }
+
+                AppLogger.i("LlamaCppEngineBridge", "CONTEXT_CREATE_SUCCESS: Created native context ID: $contextId")
+
+                currentContextId = contextId
+                activeModelName = modelName
+                isCurrentlyLoaded = true
+                lastLoadTimeMs = System.currentTimeMillis() - loadStartTime
+
+                @Suppress("UNCHECKED_CAST")
+                val modelDetailsMap = startResult["model"] as? Map<String, Any>
+                loadedModelDetails = modelDetailsMap
+
+                val detectedArch = modelDetailsMap?.get("architecture")?.toString()
+                    ?: modelDetailsMap?.get("desc")?.toString()
+                val detectedCtx = (modelDetailsMap?.get("n_ctx_train") as? Number)?.toInt() ?: effectiveContextLength
+                val detectedParams = (modelDetailsMap?.get("n_params") as? Number)?.let { num ->
+                    val paramsDouble = num.toDouble() / 1_000_000_000.0
+                    if (paramsDouble >= 0.1) String.format("%.1fB", paramsDouble) else null
+                }
+
+                AppLogger.i(
+                    "LlamaCppEngineBridge",
+                    "MODEL_LOAD_SUCCESS: Model '$modelName' loaded successfully into context $contextId in ${lastLoadTimeMs}ms (Arch: $detectedArch, Ctx: $detectedCtx, Params: $detectedParams)"
+                )
+
+                Result.success(
+                    EngineStatus(
+                        isLoaded = true,
+                        modelName = modelName,
+                        memoryFootprintMb = fileSizeMb,
+                        statusMessage = "Loaded in ${lastLoadTimeMs}ms. Hardware threads: $effectiveThreads, Context: $detectedCtx",
+                        architecture = detectedArch,
+                        contextLength = detectedCtx,
+                        parametersCount = detectedParams
                     )
                 )
-
-            currentContextId = contextId
-            activeModelName = modelName
-            isCurrentlyLoaded = true
-            lastLoadTimeMs = System.currentTimeMillis() - loadStartTime
-
-            @Suppress("UNCHECKED_CAST")
-            val modelDetailsMap = startResult["model"] as? Map<String, Any>
-            loadedModelDetails = modelDetailsMap
-
-            val detectedArch = modelDetailsMap?.get("architecture")?.toString()
-                ?: modelDetailsMap?.get("desc")?.toString()
-            val detectedCtx = (modelDetailsMap?.get("n_ctx_train") as? Number)?.toInt() ?: effectiveContextLength
-            val detectedParams = (modelDetailsMap?.get("n_params") as? Number)?.let { num ->
-                val paramsDouble = num.toDouble() / 1_000_000_000.0
-                if (paramsDouble >= 0.1) String.format("%.1fB", paramsDouble) else null
-            }
-
-            AppLogger.i(
-                "LlamaCppEngineBridge",
-                "Model '$modelName' loaded successfully into context $contextId in ${lastLoadTimeMs}ms"
-            )
-
-            Result.success(
-                EngineStatus(
-                    isLoaded = true,
-                    modelName = modelName,
-                    memoryFootprintMb = fileSizeMb,
-                    statusMessage = "Loaded in ${lastLoadTimeMs}ms. Hardware threads: $effectiveThreads, Context: $detectedCtx",
-                    architecture = detectedArch,
-                    contextLength = detectedCtx,
-                    parametersCount = detectedParams
+            } catch (e: Throwable) {
+                if (!nativeTookOwnership) {
+                    try {
+                        ParcelFileDescriptor.adoptFd(fd).close()
+                    } catch (_: Throwable) {}
+                }
+                AppLogger.e("LlamaCppEngineBridge", "MODEL_LOAD_FAILED: Exception loading model '$modelName': ${e.message}", e)
+                currentContextId = null
+                isCurrentlyLoaded = false
+                Result.failure(
+                    PocketAIException.ModelLoadFailedException(
+                        modelName,
+                        e.message ?: "Native engine initialization failure"
+                    )
                 )
-            )
+            }
         } catch (e: Throwable) {
-            AppLogger.e("LlamaCppEngineBridge", "Exception loading model '$modelName': ${e.message}", e)
+            AppLogger.e("LlamaCppEngineBridge", "MODEL_LOAD_FAILED: Unexpected error loading model '$modelName': ${e.message}", e)
             currentContextId = null
             isCurrentlyLoaded = false
             Result.failure(
@@ -276,7 +438,7 @@ class LlamaCppEngineBridge(private val context: Context) : InferenceEngine {
         try {
             val ctxId = currentContextId
             if (ctxId != null) {
-                AppLogger.i("LlamaCppEngineBridge", "Releasing native context ID: $ctxId")
+                AppLogger.i("LlamaCppEngineBridge", "MODEL_UNLOAD_START: Releasing native context ID: $ctxId")
                 try {
                     llamaAndroidInstance?.releaseContext(ctxId)
                 } catch (e: Throwable) {
@@ -288,7 +450,7 @@ class LlamaCppEngineBridge(private val context: Context) : InferenceEngine {
             isCurrentlyLoaded = false
             loadedModelDetails = null
             currentTokenListener = null
-            AppLogger.i("LlamaCppEngineBridge", "Model unloaded and native memory released.")
+            AppLogger.i("LlamaCppEngineBridge", "MODEL_UNLOAD_SUCCESS: Model unloaded and native memory released.")
             Result.success(Unit)
         } catch (e: Throwable) {
             AppLogger.e("LlamaCppEngineBridge", "Error releasing native context: ${e.message}", e)
@@ -405,3 +567,4 @@ class LlamaCppEngineBridge(private val context: Context) : InferenceEngine {
         }
     }
 }
+
