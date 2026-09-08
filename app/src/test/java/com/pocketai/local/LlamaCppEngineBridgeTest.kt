@@ -24,6 +24,38 @@ import java.nio.ByteOrder
 class LlamaCppEngineBridgeTest {
 
     @Test
+    fun testContentResolverWithLocalFile() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val file = File(context.filesDir, "dummy.gguf")
+        file.writeBytes(byteArrayOf(0x47, 0x47, 0x55, 0x46, 0x03, 0x00, 0x00, 0x00))
+
+        val uriParsed = android.net.Uri.parse(file.absolutePath)
+        var parsedWorked = false
+        try {
+            context.contentResolver.openInputStream(uriParsed)?.use {
+                parsedWorked = true
+            }
+        } catch (e: Exception) {
+            println("openInputStream with parsed path failed: ${e::class.java.name}: ${e.message}")
+        }
+
+        val uriFromFile = android.net.Uri.fromFile(file)
+        var fileUriWorked = false
+        try {
+            context.contentResolver.openInputStream(uriFromFile)?.use {
+                fileUriWorked = true
+            }
+        } catch (e: Exception) {
+            println("openInputStream with file:// failed: ${e::class.java.name}: ${e.message}")
+        }
+
+        println("parsedWorked (no scheme): $parsedWorked")
+        println("fileUriWorked (file://): $fileUriWorked")
+        assertTrue("Absolute path without scheme must be readable via ContentResolver", parsedWorked)
+        assertTrue("File URI must be readable via ContentResolver", fileUriWorked)
+    }
+
+    @Test
     fun testLlamaCppEngineBridgeInitialization() {
         val context = ApplicationProvider.getApplicationContext<Context>()
         val bridge = LlamaCppEngineBridge(context)

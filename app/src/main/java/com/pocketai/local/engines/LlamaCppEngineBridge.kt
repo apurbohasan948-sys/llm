@@ -313,10 +313,12 @@ class LlamaCppEngineBridge(private val context: Context) : InferenceEngine {
             var nativeTookOwnership = false
 
             try {
-                val fileUriString = Uri.fromFile(localFile).toString()
+                // Must pass absolute local filesystem path (without file:// or content:// prefix)
+                val absoluteModelPath = localFile.absolutePath
+                AppLogger.i("LlamaCppEngineBridge", "Absolute filesystem path for native engine: $absoluteModelPath")
 
                 val startParams = mutableMapOf<String, Any>(
-                    "model" to fileUriString,
+                    "model" to absoluteModelPath,
                     "model_fd" to fd,
                     "n_ctx" to effectiveContextLength,
                     "n_batch" to 512,
