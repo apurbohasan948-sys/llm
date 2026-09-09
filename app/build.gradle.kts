@@ -17,12 +17,31 @@ android {
     applicationId = "com.aistudio.pocketai.vqkzn"
     minSdk = 24
     targetSdk = 36
-    versionCode = 3
-    versionName = "1.2"
+    val ciRunNumber = System.getenv("GITHUB_RUN_NUMBER")?.toIntOrNull()
+    val computedVersionCode = if (ciRunNumber != null && ciRunNumber > 0) {
+      ciRunNumber + 10
+    } else {
+      4
+    }
+    versionCode = computedVersionCode
+    versionName = "1.0.$computedVersionCode"
 
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     ndk {
       abiFilters.addAll(listOf("arm64-v8a", "x86_64"))
+    }
+    externalNativeBuild {
+      cmake {
+        cppFlags += "-std=c++17"
+        arguments += "-DANDROID_STL=c++_static"
+      }
+    }
+  }
+
+  externalNativeBuild {
+    cmake {
+      path = file("src/main/cpp/CMakeLists.txt")
+      version = "3.22.1"
     }
   }
 

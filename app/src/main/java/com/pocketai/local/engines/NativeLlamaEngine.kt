@@ -33,8 +33,12 @@ class NativeLlamaEngine(private val context: Context) : InferenceEngine {
 
     private val engineScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
+    init {
+        NativeLlamaJni.ensureInitialized(context)
+    }
+
     override val isNativeEngineAvailable: Boolean
-        get() = NativeLlamaJni.isAvailable
+        get() = NativeLlamaJni.isAvailable || NativeLlamaJni.ensureInitialized(context)
 
     @Volatile
     private var modelHandle: Long = 0L
@@ -231,7 +235,11 @@ class NativeLlamaEngine(private val context: Context) : InferenceEngine {
 
         try {
             if (!isNativeEngineAvailable) {
-                val err = "PrismML llama.cpp native binary is not available on this device runtime."
+                NativeLlamaJni.ensureInitialized(context)
+            }
+            if (!isNativeEngineAvailable) {
+                val detail = NativeLlamaJni.getLoadFailureReason()
+                val err = "Inference engine unavailable: $detail"
                 AppLogger.e(TAG, err)
                 return@withContext Result.failure(PocketAIException.NativeEngineUnavailableException(err))
             }

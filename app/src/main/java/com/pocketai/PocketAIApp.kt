@@ -94,6 +94,9 @@ class PocketAIApp : Application() {
         instance = this
         AppLogger.i("PocketAIApp", "PocketAI application initialized.")
 
+        // Warm up / verify PrismML native inference engine with app context
+        com.pocketai.local.engines.NativeLlamaJni.ensureInitialized(this)
+
         // Seed initial presets, restore Obsidian vault, and reset stale loaded states on IO scope
         CoroutineScope(Dispatchers.IO).launch {
             localModelRepository.markAllUnloaded()

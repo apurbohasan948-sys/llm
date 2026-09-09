@@ -84,8 +84,8 @@ object GgufHeaderParser {
                     scanStr.contains("deepseek", ignoreCase = true) -> detectedArchitecture = "deepseek"
                 }
 
-                // Inspect common quantization tokens including Q1_0, Q2_K, etc.
-                val quantRegex = Regex("""(?i)\b(Q1_0|Q1_1|Q2_K(?:_[A-Z])?|Q3_K(?:_[A-Z])?|Q4_0|Q4_1|Q4_K(?:_[A-Z])?|Q5_0|Q5_1|Q5_K(?:_[A-Z])?|Q6_K|Q8_0|IQ[1-4]_[A-Z]+|BF16|F16)\b""")
+                // Inspect common quantization tokens including PrismML low-bit formats (PQ2_0, PTQ1_0, etc.)
+                val quantRegex = Regex("""(?i)\b(PQ2_0|PTQ1_0|TQ1_0|TQ2_0|Q1_0|Q1_1|Q2_0|Q2_K(?:_[A-Z])?|Q3_K(?:_[A-Z])?|Q4_0|Q4_1|Q4_K(?:_[A-Z])?|Q5_0|Q5_1|Q5_K(?:_[A-Z])?|Q6_K|Q8_0|IQ[1-4]_[A-Z]+|BF16|F16)\b""")
                 val quantMatch = quantRegex.find(scanStr)
                 if (quantMatch != null) {
                     detectedQuant = quantMatch.value.uppercase()
@@ -113,7 +113,7 @@ object GgufHeaderParser {
                     }
                 }
                 if (detectedQuant == null) {
-                    val fnQuantRegex = Regex("""(?i)\b(Q1_0|Q1_1|Q2_K(?:_[A-Z])?|Q3_K(?:_[A-Z])?|Q4_0|Q4_1|Q4_K(?:_[A-Z])?|Q5_0|Q5_1|Q5_K(?:_[A-Z])?|Q6_K|Q8_0|IQ[1-4]_[A-Z]+|BF16|F16)\b""")
+                    val fnQuantRegex = Regex("""(?i)\b(PQ2_0|PTQ1_0|TQ1_0|TQ2_0|Q1_0|Q1_1|Q2_0|Q2_K(?:_[A-Z])?|Q3_K(?:_[A-Z])?|Q4_0|Q4_1|Q4_K(?:_[A-Z])?|Q5_0|Q5_1|Q5_K(?:_[A-Z])?|Q6_K|Q8_0|IQ[1-4]_[A-Z]+|BF16|F16)\b""")
                     fnQuantRegex.find(filenameHint)?.let {
                         detectedQuant = it.value.uppercase()
                     }
