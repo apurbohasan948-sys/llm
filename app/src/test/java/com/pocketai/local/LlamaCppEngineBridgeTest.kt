@@ -60,7 +60,7 @@ class LlamaCppEngineBridgeTest {
         val context = ApplicationProvider.getApplicationContext<Context>()
         val bridge = LlamaCppEngineBridge(context)
 
-        assertEquals("llama.cpp GGUF Engine", bridge.engineName)
+        assertEquals("PrismML llama.cpp Engine", bridge.engineName)
         assertFalse("Bridge should not report loaded initially", bridge.isLoaded())
     }
 
@@ -77,26 +77,39 @@ class LlamaCppEngineBridgeTest {
     }
 
     @Test
-    fun testLlamaCppClassesExistOnClasspath() {
+    fun testPrismLlamaClassesExistOnClasspath() {
         val classLoader = this.javaClass.classLoader
-        val llamaAndroidClass = Class.forName("org.nehuatl.llamacpp.LlamaAndroid", false, classLoader)
-        val llamaContextClass = Class.forName("org.nehuatl.llamacpp.LlamaContext", false, classLoader)
-        val llamaHelperClass = Class.forName("org.nehuatl.llamacpp.LlamaHelper", false, classLoader)
+        val nativeJniClass = Class.forName("com.pocketai.local.engines.NativeLlamaJni", false, classLoader)
+        val nativeEngineClass = Class.forName("com.pocketai.local.engines.NativeLlamaEngine", false, classLoader)
 
-        assertNotNull(llamaAndroidClass)
-        assertNotNull(llamaContextClass)
-        assertNotNull(llamaHelperClass)
+        assertNotNull(nativeJniClass)
+        assertNotNull(nativeEngineClass)
 
-        // Verify key methods exist on LlamaAndroid
-        val startEngineMethod = llamaAndroidClass.methods.find { it.name == "startEngine" }
-        val launchCompletionMethod = llamaAndroidClass.methods.find { it.name == "launchCompletion" }
-        val releaseContextMethod = llamaAndroidClass.methods.find { it.name == "releaseContext" }
-        val stopCompletionMethod = llamaAndroidClass.methods.find { it.name == "stopCompletion" }
+        // Verify key native methods exist on NativeLlamaJni
+        val initMethod = nativeJniClass.methods.find { it.name == "nativeInitBackend" }
+        val loadMethod = nativeJniClass.methods.find { it.name == "nativeLoadModel" }
+        val ctxMethod = nativeJniClass.methods.find { it.name == "nativeCreateContext" }
+        val streamMethod = nativeJniClass.methods.find { it.name == "nativeGenerateStream" }
+        val stopMethod = nativeJniClass.methods.find { it.name == "nativeStopGeneration" }
 
-        assertNotNull("startEngine method must exist on LlamaAndroid", startEngineMethod)
-        assertNotNull("launchCompletion method must exist on LlamaAndroid", launchCompletionMethod)
-        assertNotNull("releaseContext method must exist on LlamaAndroid", releaseContextMethod)
-        assertNotNull("stopCompletion method must exist on LlamaAndroid", stopCompletionMethod)
+        assertNotNull("nativeInitBackend method must exist on NativeLlamaJni", initMethod)
+        assertNotNull("nativeLoadModel method must exist on NativeLlamaJni", loadMethod)
+        assertNotNull("nativeCreateContext method must exist on NativeLlamaJni", ctxMethod)
+        assertNotNull("nativeGenerateStream method must exist on NativeLlamaJni", streamMethod)
+        assertNotNull("nativeStopGeneration method must exist on NativeLlamaJni", stopMethod)
+
+        // Verify required API methods exist on NativeLlamaEngine
+        val loadModelMethod = nativeEngineClass.methods.find { it.name.startsWith("loadModel") }
+        val unloadModelMethod = nativeEngineClass.methods.find { it.name.startsWith("unloadModel") }
+        val createContextMethod = nativeEngineClass.methods.find { it.name.startsWith("createContext") }
+        val getModelInfoMethod = nativeEngineClass.methods.find { it.name == "getModelInfo" }
+        val isModelLoadedMethod = nativeEngineClass.methods.find { it.name == "isModelLoaded" }
+
+        assertNotNull("loadModel method must exist on NativeLlamaEngine", loadModelMethod)
+        assertNotNull("unloadModel method must exist on NativeLlamaEngine", unloadModelMethod)
+        assertNotNull("createContext method must exist on NativeLlamaEngine", createContextMethod)
+        assertNotNull("getModelInfo method must exist on NativeLlamaEngine", getModelInfoMethod)
+        assertNotNull("isModelLoaded method must exist on NativeLlamaEngine", isModelLoadedMethod)
     }
 
     @Test

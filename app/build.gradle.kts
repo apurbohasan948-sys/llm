@@ -17,12 +17,18 @@ android {
     applicationId = "com.aistudio.pocketai.vqkzn"
     minSdk = 24
     targetSdk = 36
-    versionCode = 2
-    versionName = "1.1"
+    versionCode = 3
+    versionName = "1.2"
 
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     ndk {
       abiFilters.addAll(listOf("arm64-v8a", "x86_64"))
+    }
+  }
+
+  packaging {
+    jniLibs {
+      useLegacyPackaging = true
     }
   }
 
@@ -122,7 +128,7 @@ dependencies {
   implementation(libs.okhttp)
   // implementation(libs.play.services.location)
   implementation(libs.retrofit)
-  implementation(libs.llamacpp.kotlin)
+  // implementation(libs.llamacpp.kotlin) - Replaced with custom PrismML llama.cpp native build
   testImplementation(libs.androidx.compose.ui.test.junit4)
   testImplementation(libs.androidx.core)
   testImplementation(libs.androidx.junit)
